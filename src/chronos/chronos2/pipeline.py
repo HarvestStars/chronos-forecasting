@@ -175,7 +175,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
             min_past = prediction_length
 
         train_dataset = Chronos2Dataset.convert_inputs(
-            inputs=inputs,
+            inputs=inputs, # inputs is list of dicts, each dict(target, past_covariates, future_covariates) is one task, used to fulfill the self.tasks
             context_length=context_length,
             prediction_length=prediction_length,
             batch_size=batch_size,
@@ -348,8 +348,8 @@ class Chronos2Pipeline(BaseChronosPipeline):
             original_values=rearrange(prediction, "b q h -> b h q"),
         )
         prediction_unrolled = rearrange(prediction_unrolled, "b h q -> b q h")
-        context = torch.cat([context, prediction_unrolled], dim=-1)[..., -self.model_context_length :]
-        n_paths = len(unrolled_quantiles)
+        context = torch.cat([context, prediction_unrolled], dim=-1)[..., -self.model_context_length :] # original context shape [b q t]
+        n_paths = len(unrolled_quantiles) # q
 
         # Shift future_covariates by prediction.shape[-1] while replacing the predicted values
         # of future covariates in the context with their actual values, if known
@@ -489,6 +489,8 @@ class Chronos2Pipeline(BaseChronosPipeline):
         The model's predictions, a list of `torch.Tensor` where each element has shape (n_variates, n_quantiles, prediction_length) and the number of
         elements are equal to the number of target time series (univariate or multivariate) in the `inputs`.
 
+        Each 'element' corresponds to each 'task' in <inputs> in the same order.
+
         """
         model_prediction_length = self.model_prediction_length
         if prediction_length is None:
@@ -593,8 +595,8 @@ class Chronos2Pipeline(BaseChronosPipeline):
         remaining = prediction_length
 
         # predict first set of patches up to max_output_patches
-        prediction: torch.Tensor = self._predict_step(
-            context=context,
+        prediction: torch.Tensor = self._predict_step( # handle the batch-wise prediction
+            context=context, # this batch context
             group_ids=group_ids,
             future_covariates=future_covariates,
             num_output_patches=get_num_output_patches(remaining),
@@ -707,12 +709,12 @@ class Chronos2Pipeline(BaseChronosPipeline):
         predictions: list[torch.Tensor] = self.predict(inputs, prediction_length=prediction_length, **predict_kwargs)
 
         # Swap quantile and time axes for each prediction
-        predictions = [rearrange(pred, "... q h -> ... h q") for pred in predictions]
+        predictions = [rearrange(pred, "... q h -> ... h q") for pred in predictions] # original pred shape (n_variates, n_quantiles, prediction_length) denote as (vn,q,h) then transform -> (vn,h,q)
 
         if set(quantile_levels).issubset(training_quantile_levels):
             # no need to perform intra/extrapolation
             quantile_indices = [training_quantile_levels.index(q) for q in quantile_levels]
-            quantiles = [pred[..., quantile_indices] for pred in predictions]
+            quantiles = [pred[..., quantile_indices] for pred in predictions] # each pred is one task's prediction, shape (n_variates, prediction_length, n_quantiles)
         else:
             # we interpolate quantiles if quantiles that Chronos-2 was trained on were not provided
             if min(quantile_levels) < min(training_quantile_levels) or max(quantile_levels) > max(

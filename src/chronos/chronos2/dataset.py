@@ -530,7 +530,7 @@ def convert_df_input_to_list_of_dicts_input(
     start_idx: int = 0
     future_start_idx: int = 0
 
-    for i, length in enumerate(series_lengths):
+    for i, length in enumerate(series_lengths): # i is the series index from id_column, as series_lengths is aggregated by id_column uniquely, seems i is also equal to the task index
         series_data = df.iloc[start_idx : start_idx + length]
         # Extract target(s)
         target_data = series_data[target_columns].to_numpy().T  # Shape: (n_targets, history_length)
@@ -728,7 +728,7 @@ class Chronos2Dataset(IterableDataset):
         super().__init__()
         assert mode in {DatasetMode.TRAIN, DatasetMode.VALIDATION, DatasetMode.TEST}, f"Invalid mode: {mode}"
 
-        self.tasks = Chronos2Dataset._prepare_tasks(inputs, prediction_length, min_past, mode)
+        self.tasks = Chronos2Dataset._prepare_tasks(inputs, prediction_length, min_past, mode) # tasks are convert from inputs, each task built from each input dictionary
         self.context_length = context_length
         self.prediction_length = prediction_length
         self.batch_size = batch_size
@@ -845,7 +845,7 @@ class Chronos2Dataset(IterableDataset):
 
         target_start_idx = 0
         for group_id, task_idx in enumerate(task_indices):
-            task_context, task_future_target, task_future_covariates, task_n_targets = self._construct_slice(task_idx)
+            task_context, task_future_target, task_future_covariates, task_n_targets = self._construct_slice(task_idx) # each task means each input dictionary
 
             group_size = task_context.shape[0]
             task_group_ids = torch.full((group_size,), fill_value=group_id)
