@@ -405,10 +405,10 @@ def validate_df_inputs(
 
     # Sort and prepare df
     df[timestamp_column] = pd.to_datetime(df[timestamp_column])
-    df = df.sort_values([id_column, timestamp_column])
+    df = df.sort_values([id_column, timestamp_column]) # makes df aggregated block-wise by id_column and timestamp, id_column is task identifier.
 
     # Get series lengths
-    series_lengths = df[id_column].value_counts(sort=False).to_list()
+    series_lengths = df[id_column].value_counts(sort=False).to_list() # ["a", "a", "a", "b", "b", "c"] -> [3, 2, 1] for a,b,c
 
     def validate_freq(timestamps: pd.Series, series_id: str):
         freq = pd.infer_freq(timestamps)
@@ -515,6 +515,7 @@ def convert_df_input_to_list_of_dicts_input(
 
     import pandas as pd
 
+    # sort the df and future_df by (id_column, timestamp_column), and get series lengths
     df, future_df, freq, series_lengths, future_series_lengths, original_order = validate_df_inputs(
         df,
         future_df=future_df,
@@ -530,7 +531,7 @@ def convert_df_input_to_list_of_dicts_input(
     start_idx: int = 0
     future_start_idx: int = 0
 
-    for i, length in enumerate(series_lengths): # i is the series index from id_column, as series_lengths is aggregated by id_column uniquely, seems i is also equal to the task index
+    for i, length in enumerate(series_lengths): # i is the series index from id_column by sort_values[id, timestamp], so i is also equal to the task index
         series_data = df.iloc[start_idx : start_idx + length]
         # Extract target(s)
         target_data = series_data[target_columns].to_numpy().T  # Shape: (n_targets, history_length)

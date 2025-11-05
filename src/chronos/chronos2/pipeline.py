@@ -740,7 +740,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
         self,
         df: "pd.DataFrame",
         future_df: "pd.DataFrame | None" = None,
-        id_column: str = "item_id",
+        id_column: str = "item_id", # task(input dict element) identifier
         timestamp_column: str = "timestamp",
         target: str | list[str] = "target",
         prediction_length: int | None = None,
@@ -798,6 +798,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
         if not isinstance(target, list):
             target = [target]
 
+        # Convert DataFrame input to the "inputs" ( also known as "tasks", also the list of dicts(tasks) )
         inputs, original_order, prediction_timestamps = convert_df_input_to_list_of_dicts_input(
             df=df,
             future_df=future_df,
