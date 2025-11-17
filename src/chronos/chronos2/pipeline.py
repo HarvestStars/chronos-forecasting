@@ -542,7 +542,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
         test_loader = DataLoader(test_dataset, batch_size=None, pin_memory=True, shuffle=False, drop_last=False)
 
         all_predictions: list[torch.Tensor] = []
-        for batch in test_loader:
+        for batch in test_loader: # for example, we have 10 tasks, and 5 tasks combine a batch, then we have 2 batches, then the batch_index is "1" for (1~5 tasks), "2" for (6~10 tasks)
             assert batch["future_target"] is None
             batch_context = batch["context"]
             batch_group_ids = batch["group_ids"]
@@ -552,7 +552,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
             if predict_batches_jointly:
                 batch_group_ids = torch.zeros_like(batch_group_ids)
 
-            batch_prediction = self._predict_batch(
+            batch_prediction = self._predict_batch( # (b,q,h)
                 context=batch_context,
                 group_ids=batch_group_ids,
                 future_covariates=batch_future_covariates,
@@ -561,7 +561,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
                 max_output_patches=max_output_patches,
                 target_idx_ranges=batch_target_idx_ranges,
             )
-            all_predictions.extend(batch_prediction)
+            all_predictions.extend(batch_prediction) # list of (b,q,h), which is (batch_index, batch_size, n_quantiles, prediction_length)
 
         return all_predictions
 
@@ -595,7 +595,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
             future_covariates=future_covariates,
             num_output_patches=get_num_output_patches(remaining),
         )
-        predictions.append(prediction)
+        predictions.append(prediction) # (b,q,h) --> list of (b,q,h)
         remaining -= prediction.shape[-1]
 
         # prepare inputs for long horizon prediction
@@ -623,7 +623,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
             predictions.append(prediction)
             remaining -= prediction.shape[-1]
 
-        batch_prediction = torch.cat(predictions, dim=-1)[..., :prediction_length].to(
+        batch_prediction = torch.cat(predictions, dim=-1)[..., :prediction_length].to( # list of (b,q,h) --> (b,q,h)
             dtype=torch.float32, device="cpu"
         )
 
@@ -654,7 +654,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
         with torch.no_grad():
             prediction: torch.Tensor = self.model(
                 context=context, group_ids=group_ids, num_output_patches=num_output_patches, **kwargs
-            ).quantile_preds.to(context)
+            ).quantile_preds.to(context) # (batch_size, n_quantiles, length)
 
         return prediction
 
@@ -700,15 +700,15 @@ class Chronos2Pipeline(BaseChronosPipeline):
         """
         training_quantile_levels = self.quantiles
 
-        predictions: list[torch.Tensor] = self.predict(inputs, prediction_length=prediction_length, **predict_kwargs)
+        predictions: list[torch.Tensor] = self.predict(inputs, prediction_length=prediction_length, **predict_kwargs) # (batch_index, n_variates, n_quantiles, prediction_length)
 
         # Swap quantile and time axes for each prediction
-        predictions = [rearrange(pred, "... q h -> ... h q") for pred in predictions] # original pred shape (n_variates, n_quantiles, prediction_length) denote as (vn,q,h) then transform -> (vn,h,q)
+        predictions = [rearrange(pred, "... q h -> ... h q") for pred in predictions] # original pred shape (batch_index(like index 1: task 1~5, index 2: task 6~10), batch_size(n_variates), n_quantiles, prediction_length) denote as (b_indx, b_size, q, h) then transform -> (b_indx, b_size, h, q)
 
         if set(quantile_levels).issubset(training_quantile_levels):
             # no need to perform intra/extrapolation
             quantile_indices = [training_quantile_levels.index(q) for q in quantile_levels]
-            quantiles = [pred[..., quantile_indices] for pred in predictions] # each pred is one task's prediction, shape (n_variates, prediction_length, n_quantiles)
+            quantiles = [pred[..., quantile_indices] for pred in predictions] # each pred is a batch-wise prediction, shape (n_variates, prediction_length, n_quantiles)
         else:
             # we interpolate quantiles if quantiles that Chronos-2 was trained on were not provided
             if min(quantile_levels) < min(training_quantile_levels) or max(quantile_levels) > max(
