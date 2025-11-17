@@ -542,7 +542,7 @@ class Chronos2Model(PreTrainedModel):
         )
         # the first components masks any missing targets and the second component masks known future values
         loss_mask = future_target_mask.float() * inv_future_covariate_mask # shape: (B, 1, future_length) * (B, 1, (n p)) --> (B, 1, future_length)
-        loss = quantile_loss * loss_mask                                   # shape: (B, num_quantiles, future_length) * (B, 1, future_length) --> (B, num_quantiles, future_length)
+        loss = quantile_loss * loss_mask                                   # shape: (B, num_quantiles(q), future_length(n*p)) * (B, 1, future_length) --> (B, num_quantiles, future_length)
         # mean over prediction horizon, sum over quantile levels and mean over batch
         loss = loss.mean(dim=-1).sum(dim=-1).mean()
 
