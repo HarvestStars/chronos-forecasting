@@ -164,3 +164,7 @@ cython_debug/
 
 notebooks/rawData/*
 notebooks/chronos-2-finetuned/*
+chronos-2-finetuned
+# Kiro IDE
+.kiro
+
