@@ -625,7 +625,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
             if cross_learning:
                 batch_group_ids = torch.zeros_like(batch_group_ids)
 
-            batch_prediction = self._predict_batch( # (b,q,h)
+            batch_prediction = self._predict_batch( # list of (target_variates_per_task, q, h)
                 context=batch_context,
                 group_ids=batch_group_ids,
                 future_covariates=batch_future_covariates,
@@ -634,7 +634,13 @@ class Chronos2Pipeline(BaseChronosPipeline):
                 max_output_patches=max_output_patches,
                 target_idx_ranges=batch_target_idx_ranges,
             )
-            all_predictions.extend(batch_prediction) # list of (b,q,h), which is (batch_index, batch_size, n_quantiles, prediction_length)
+            # batch_prediction: List[Tensor], length == number_of_tasks_in_this_dataloader_batch
+            # each element corresponds to one task (one input series dict / one row in ctx_inputs batch)
+            # and has shape: (target_variates_per_task, n_quantiles, prediction_length)
+
+            all_predictions.extend(batch_prediction) # list of (target_variates_per_task, q, h), which shape is (task_index(batch_index), target_variates_per_task, n_quantiles, prediction_length)
+            # all_predictions: List[Tensor], length == number_of_tasks_in_all_inputs (after iterating all dataloader batches)
+            # each element shape: (target_variates_per_task, n_quantiles(q), prediction_length(h))
 
         return all_predictions
 
@@ -700,7 +706,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
             dtype=torch.float32, device="cpu"
         )
 
-        return [batch_prediction[start:end] for (start, end) in target_idx_ranges]
+        return [batch_prediction[start:end] for (start, end) in target_idx_ranges] # list of (targetTS_per_task,q,h) --> (task_number, targetTS_per_task, q, h)
 
     def _predict_step(
         self,
@@ -773,15 +779,15 @@ class Chronos2Pipeline(BaseChronosPipeline):
         """
         training_quantile_levels = self.quantiles
 
-        predictions: list[torch.Tensor] = self.predict(inputs, prediction_length=prediction_length, **predict_kwargs) # (batch_index, n_variates, n_quantiles, prediction_length)
+        predictions: list[torch.Tensor] = self.predict(inputs, prediction_length=prediction_length, **predict_kwargs) # (task_index(batch_index), target_variates_per_task, n_quantiles, prediction_length)
 
         # Swap quantile and time axes for each prediction
-        predictions = [rearrange(pred, "... q h -> ... h q") for pred in predictions] # original pred shape (batch_index(like index 1: task 1~5, index 2: task 6~10), batch_size(n_variates), n_quantiles, prediction_length) denote as (b_indx, b_size, q, h) then transform -> (b_indx, b_size, h, q)
+        predictions = [rearrange(pred, "... q h -> ... h q") for pred in predictions] # original pred shape (batch_index(like index 1: task 1~5, index 2: task 6~10), batch_size(n_variates), n_quantiles, prediction_length) denote as (task_index(batch_index), b_size, q, h) then transform -> (task_index(batch_index), target_indx_inner, h, q)
 
         if set(quantile_levels).issubset(training_quantile_levels):
             # no need to perform intra/extrapolation
             quantile_indices = [training_quantile_levels.index(q) for q in quantile_levels]
-            quantiles = [pred[..., quantile_indices] for pred in predictions] # each pred is a batch-wise prediction, shape (n_variates, prediction_length, n_quantiles)
+            quantiles = [pred[..., quantile_indices] for pred in predictions] # each pred is a task-wise prediction, shape (target_variates_per_task, prediction_length, n_quantiles)
         else:
             # we interpolate quantiles if quantiles that Chronos-2 was trained on were not provided
             if min(quantile_levels) < min(training_quantile_levels) or max(quantile_levels) > max(
@@ -799,7 +805,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
             ]
 
         # NOTE: the median is returned as the mean here
-        mean = [pred[..., training_quantile_levels.index(0.5)] for pred in predictions]
+        mean = [pred[..., training_quantile_levels.index(0.5)] for pred in predictions] # predictions: (task_index(batch_index), target_indx_inner, h, q) --> mean: (task_index(batch_index), target_indx_inner, h)
 
         return quantiles, mean
 
