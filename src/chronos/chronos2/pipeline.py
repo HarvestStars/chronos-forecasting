@@ -314,6 +314,37 @@ class Chronos2Pipeline(BaseChronosPipeline):
 
         training_kwargs.update(extra_trainer_kwargs)
 
+        # ---- HPC/Slurm safety: ensure MASTER_ADDR is set for single-node Slurm jobs ----
+        if "SLURM_JOB_ID" in os.environ:
+            # Slurm uses different keys on different systems
+            def _get_int(*keys, default=1):
+                for k in keys:
+                    v = os.environ.get(k)
+                    if v is not None and str(v).strip() != "":
+                        try:
+                            return int(v)
+                        except ValueError:
+                            pass
+                return default
+
+            nnodes = _get_int("SLURM_NNODES", "SLURM_JOB_NUM_NODES", default=1)
+            # Step/task vars can be >1 even when you don't want DDP, so don't rely on them too hard
+            ntasks = _get_int("SLURM_NTASKS", "SLURM_STEP_NUM_TASKS", "SLURM_NPROCS", default=1)
+
+            # If it's a single-node allocation and MASTER_ADDR is missing, set a safe local default.
+            if nnodes <= 1 and "MASTER_ADDR" not in os.environ:
+                os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+                os.environ.setdefault("MASTER_PORT", os.environ.get("MASTER_PORT", "29500"))
+                # Keep these consistent for the common single-process case
+                os.environ.setdefault("WORLD_SIZE", "1")
+                os.environ.setdefault("RANK", "0")
+                os.environ.setdefault("LOCAL_RANK", "0")
+
+                # Also tell TrainingArguments we're not doing DDP
+                training_kwargs.setdefault("local_rank", -1)
+                training_kwargs.setdefault("ddp_backend", None)
+                training_kwargs.setdefault("ddp_find_unused_parameters", False)
+
         if training_kwargs["tf32"]:
             # setting tf32=True changes these global properties, we copy them here so that
             # we can restore them after fine-tuning
@@ -321,6 +352,14 @@ class Chronos2Pipeline(BaseChronosPipeline):
             cudnn_tf32 = torch.backends.cudnn.allow_tf32
 
         training_args = TrainingArguments(**training_kwargs)
+
+        print("DEBUG(after patch) MASTER_ADDR =", os.environ.get("MASTER_ADDR"))
+        print("DEBUG(after patch) WORLD_SIZE =", os.environ.get("WORLD_SIZE"))
+        print("DEBUG(after patch) RANK =", os.environ.get("RANK"))
+        print("DEBUG(after patch) LOCAL_RANK =", os.environ.get("LOCAL_RANK"))
+        print("DEBUG(after patch) SLURM_NNODES =", os.environ.get("SLURM_NNODES"))
+        print("DEBUG(after patch) SLURM_NTASKS =", os.environ.get("SLURM_NTASKS"))
+        print("DEBUG(after patch) SLURM_STEP_NUM_TASKS =", os.environ.get("SLURM_STEP_NUM_TASKS"))
 
         if disable_data_parallel and not use_cpu:
             # This is a hack to disable the default `transformers` behavior of using DataParallel
