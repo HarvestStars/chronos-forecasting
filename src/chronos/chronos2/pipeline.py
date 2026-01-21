@@ -9,7 +9,7 @@ import time
 import warnings
 from copy import deepcopy
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Literal, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -114,6 +114,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
         finetuned_ckpt_name: str = "finetuned-ckpt",
         callbacks: list["TrainerCallback"] | None = None,
         remove_printer_callback: bool = False,
+        disable_data_parallel: bool = True,
         **extra_trainer_kwargs,
     ) -> "Chronos2Pipeline":
         """
@@ -158,6 +159,8 @@ class Chronos2Pipeline(BaseChronosPipeline):
             A list of `TrainerCallback`s which will be forwarded to the HuggingFace `Trainer`
         remove_printer_callback
             If True, all instances of `PrinterCallback` are removed from callbacks
+        disable_data_parallel
+            If True, ensures that DataParallel is disabled and training happens on a single GPU
         **extra_trainer_kwargs
             Extra kwargs are directly forwarded to `TrainingArguments`
 
@@ -318,6 +321,11 @@ class Chronos2Pipeline(BaseChronosPipeline):
             cudnn_tf32 = torch.backends.cudnn.allow_tf32
 
         training_args = TrainingArguments(**training_kwargs)
+
+        if disable_data_parallel and not use_cpu:
+            # This is a hack to disable the default `transformers` behavior of using DataParallel
+            training_args._n_gpu = 1
+            assert training_args.n_gpu == 1  # Ensure that the hack worked
 
         trainer = Chronos2Trainer(
             model=model,
@@ -571,6 +579,8 @@ class Chronos2Pipeline(BaseChronosPipeline):
         # effective batch size increases by a factor of `len(unrolled_quantiles)` when making long-horizon predictions,
         # by default [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
         unrolled_quantiles = kwargs.pop("unrolled_quantiles", [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+        # A callback which is called after each batch has been processed
+        after_batch_callback: Callable = kwargs.pop("after_batch", lambda: None)
 
         if len(kwargs) > 0:
             raise TypeError(f"Unexpected keyword arguments: {list(kwargs.keys())}.")
@@ -641,6 +651,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
             all_predictions.extend(batch_prediction) # list of (target_variates_per_task, q, h), which shape is (task_index(batch_index), target_variates_per_task, n_quantiles, prediction_length)
             # all_predictions: List[Tensor], length == number_of_tasks_in_all_inputs (after iterating all dataloader batches)
             # each element shape: (target_variates_per_task, n_quantiles(q), prediction_length(h))
+            after_batch_callback()
 
         return all_predictions
 
@@ -822,6 +833,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
         context_length: int | None = None,
         cross_learning: bool = False,
         validate_inputs: bool = True,
+        freq: str | None = None,
         **predict_kwargs,
     ) -> "pd.DataFrame":
         """
@@ -861,8 +873,14 @@ class Chronos2Pipeline(BaseChronosPipeline):
             For optimal results, consider using a batch size around 100 (as used in the Chronos-2 technical report).
             - Cross-learning is most helpful when individual time series have limited historical context, as the model can leverage patterns from related series in the batch.
         validate_inputs
-            When True, the dataframe(s) will be validated before prediction, ensuring that timestamps have a
-            regular frequency, and item IDs match between past and future data. Setting to False disables these checks.
+            [ADVANCED] When True (default), validates dataframes before prediction. Setting to False removes the
+            validation overhead, but may silently lead to wrong predictions if data is misformatted. When False, you
+            must ensure: (1) all dataframes are sorted by (id_column, timestamp_column); (2) future_df (if provided)
+            has the same item IDs as df with exactly prediction_length rows of future timestamps per item; (3) all
+            timestamps are regularly spaced (e.g., with hourly frequency).
+        freq
+            Frequency string for timestamp generation (e.g., "h", "D", "W"). Can only be used when
+            validate_inputs=False. When provided, skips frequency inference from the data.
         **predict_kwargs
             Additional arguments passed to predict_quantiles
 
@@ -894,6 +912,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
             timestamp_column=timestamp_column,
             target_columns=target,
             prediction_length=prediction_length,
+            freq=freq,
             validate_inputs=validate_inputs,
         )
 
@@ -912,27 +931,29 @@ class Chronos2Pipeline(BaseChronosPipeline):
         quantiles_np = torch.stack(quantiles).numpy()  # [n_tasks, n_variates, horizon, num_quantiles]
         mean_np = torch.stack(mean).numpy()  # [n_tasks, n_variates, horizon]
 
-        results_dfs = []
-        for i, (series_id, future_ts) in enumerate(prediction_timestamps.items()):
-            q_pred = quantiles_np[i]  # (n_variates, prediction_length, len(quantile_levels))
-            point_pred = mean_np[i]  # (n_variates, prediction_length)
+        n_tasks = len(prediction_timestamps)
+        n_variates = len(target)
 
-            for target_idx, target_col in enumerate(target):
-                series_forecast_data: dict[str | tuple[str, str], Any] = {
-                    id_column: series_id,
-                    timestamp_column: future_ts,
-                    "target_name": target_col,
-                }
-                series_forecast_data["predictions"] = point_pred[target_idx]
-                for q_idx, q_level in enumerate(quantile_levels):
-                    series_forecast_data[str(q_level)] = q_pred[target_idx, :, q_idx]
+        series_ids = list(prediction_timestamps.keys())
+        future_ts = list(prediction_timestamps.values())
 
-                results_dfs.append(pd.DataFrame(series_forecast_data))
+        data = {
+            id_column: np.repeat(series_ids, n_variates * prediction_length),
+            timestamp_column: np.concatenate([np.tile(ts, n_variates) for ts in future_ts]),
+            "target_name": np.tile(np.repeat(target, prediction_length), n_tasks),
+            "predictions": mean_np.ravel(),
+        }
 
-        predictions_df = pd.concat(results_dfs, ignore_index=True)
-        predictions_df.set_index(id_column, inplace=True)
-        predictions_df = predictions_df.loc[original_order]
-        predictions_df.reset_index(inplace=True)
+        quantiles_flat = quantiles_np.reshape(-1, len(quantile_levels))
+        for q_idx, q_level in enumerate(quantile_levels):
+            data[str(q_level)] = quantiles_flat[:, q_idx]
+
+        predictions_df = pd.DataFrame(data)
+        # If validate_inputs=False, the df is used as-is without sorting by item_id, no reordering required
+        if validate_inputs:
+            predictions_df.set_index(id_column, inplace=True)
+            predictions_df = predictions_df.loc[original_order]
+            predictions_df.reset_index(inplace=True)
 
         return predictions_df
 
