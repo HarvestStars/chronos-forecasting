@@ -230,7 +230,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
             min_past = prediction_length
 
         train_dataset = Chronos2Dataset.convert_inputs(
-            inputs=inputs, # inputs is list of dicts, each dict(target, past_covariates, future_covariates) is one task, used to fulfill the self.tasks
+            inputs=inputs, # when inputs is list of dicts, each dict(target, past_covariates, future_covariates) is one task, used to fulfill the self.tasks
             context_length=context_length,
             prediction_length=prediction_length,
             batch_size=batch_size,
@@ -648,9 +648,11 @@ class Chronos2Pipeline(BaseChronosPipeline):
             # each element corresponds to one task (one input series dict / one row in ctx_inputs batch)
             # and has shape: (target_variates_per_task, n_quantiles, prediction_length)
 
-            all_predictions.extend(batch_prediction) # list of (target_variates_per_task, q, h), which shape is (task_index(batch_index), target_variates_per_task, n_quantiles, prediction_length)
             # all_predictions: List[Tensor], length == number_of_tasks_in_all_inputs (after iterating all dataloader batches)
             # each element shape: (target_variates_per_task, n_quantiles(q), prediction_length(h))
+            all_predictions.extend(batch_prediction) # list of (target_variates_per_task, q, h), which shape is (task_index(batch_index), target_variates_per_task, n_quantiles, prediction_length)
+
+            # newly added callback after each batch is processed
             after_batch_callback()
 
         return all_predictions
@@ -793,7 +795,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
         predictions: list[torch.Tensor] = self.predict(inputs, prediction_length=prediction_length, **predict_kwargs) # (task_index(batch_index), target_variates_per_task, n_quantiles, prediction_length)
 
         # Swap quantile and time axes for each prediction
-        predictions = [rearrange(pred, "... q h -> ... h q") for pred in predictions] # original pred shape (batch_index(like index 1: task 1~5, index 2: task 6~10), batch_size(n_variates), n_quantiles, prediction_length) denote as (task_index(batch_index), b_size, q, h) then transform -> (task_index(batch_index), target_indx_inner, h, q)
+        predictions = [rearrange(pred, "... q h -> ... h q") for pred in predictions] # original pred shape (batch_index(like index 1: task 1~5, index 2: task 6~10), batch_size(n_variates), n_quantiles, prediction_length) denote as (b_indx, b_size, q, h) then transform -> (b_indx, b_size, h(pred_len), q)
 
         if set(quantile_levels).issubset(training_quantile_levels):
             # no need to perform intra/extrapolation
