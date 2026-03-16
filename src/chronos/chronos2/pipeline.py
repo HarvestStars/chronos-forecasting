@@ -116,6 +116,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
         callbacks: list["TrainerCallback"] | None = None,
         remove_printer_callback: bool = False,
         disable_data_parallel: bool = True,
+        convert_inputs: bool = True,
         **extra_trainer_kwargs,
     ) -> "Chronos2Pipeline":
         """
@@ -162,6 +163,10 @@ class Chronos2Pipeline(BaseChronosPipeline):
             If True, all instances of `PrinterCallback` are removed from callbacks
         disable_data_parallel
             If True, ensures that DataParallel is disabled and training happens on a single GPU
+        convert_inputs
+            If True (default), preprocess raw inputs (convert tensors, encode categoricals, validate).
+            If False, inputs are expected to be already preprocessed using `chronos.chronos2.dataset.prepare_inputs`.
+            This allows for efficient training on large datasets that don't fit in memory.
         **extra_trainer_kwargs
             Extra kwargs are directly forwarded to `TrainingArguments`
 
@@ -230,7 +235,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
         if min_past is None:
             min_past = prediction_length
 
-        train_dataset = Chronos2Dataset.convert_inputs(
+        train_dataset = Chronos2Dataset(
             inputs=inputs, # when inputs is list of dicts, each dict(target, past_covariates, future_covariates) is one task, used to fulfill the self.tasks
             context_length=context_length,
             prediction_length=prediction_length,
@@ -238,6 +243,7 @@ class Chronos2Pipeline(BaseChronosPipeline):
             output_patch_size=self.model_output_patch_size,
             min_past=min_past,
             mode=DatasetMode.TRAIN,
+            convert_inputs=convert_inputs,
         )
 
         if output_dir is None:
@@ -291,14 +297,14 @@ class Chronos2Pipeline(BaseChronosPipeline):
         eval_dataset = None
         callbacks = callbacks or []
         if validation_inputs is not None:
-            # construct validation dataset
-            eval_dataset = Chronos2Dataset.convert_inputs(
+            eval_dataset = Chronos2Dataset(
                 inputs=validation_inputs,
                 context_length=context_length,
                 prediction_length=prediction_length,
                 batch_size=batch_size,
                 output_patch_size=self.model_output_patch_size,
                 mode=DatasetMode.VALIDATION,
+                convert_inputs=convert_inputs,
             )
 
             # set validation parameters
@@ -652,8 +658,8 @@ class Chronos2Pipeline(BaseChronosPipeline):
             )
             context_length = self.model_context_length
 
-        test_dataset = Chronos2Dataset.convert_inputs(
-            inputs=inputs,
+        test_dataset = Chronos2Dataset(
+            inputs,
             context_length=context_length,
             prediction_length=prediction_length,
             batch_size=batch_size,
@@ -1187,8 +1193,8 @@ class Chronos2Pipeline(BaseChronosPipeline):
             )
             context_length = self.model_context_length
 
-        test_dataset = Chronos2Dataset.convert_inputs(
-            inputs=inputs,
+        test_dataset = Chronos2Dataset(
+            inputs,
             context_length=context_length,
             prediction_length=0,
             batch_size=batch_size,
