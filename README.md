@@ -114,6 +114,65 @@ plt.fill_between(
 plt.legend()
 ```
 
+### Chronos-2 Fine-tuning Losses (dev branch)
+
+On this `dev` branch, we added pluggable loss variants for `Chronos2Pipeline.fit(...)` so that
+fine-tuning can be aligned with financial log-return objectives.
+
+Set the loss via:
+
+```python
+finetuned = pipeline.fit(
+    inputs=inputs,
+    prediction_length=prediction_length,
+    loss_type="directional_hybrid",  # one of: native, weighted_extreme_time_decay, magnitude_weighted, directional_hybrid
+    loss_quantile_extreme_gamma=2.0,
+    loss_quantile_extreme_power=2.0,
+    loss_time_decay=0.8,
+    loss_magnitude_alpha=1.0,
+    loss_directional_lambda=0.2,
+    loss_directional_temperature=0.1,
+)
+```
+
+Loss variants and motivation:
+
+- `native` (baseline):
+  - Same objective as the original Chronos-2 fine-tuning setup.
+  - Pinball loss with masking, then mean over horizon, sum over quantiles, mean over batch.
+
+- `weighted_extreme_time_decay`:
+  - Goal: emphasize tail quantiles (risk) and near-term timesteps (decision relevance).
+  - Weights:
+    - `w_q = 1 + gamma * (2 * abs(q - 0.5))^p`
+    - `w_t = decay^t` (normalized to mean 1)
+  - Objective:
+    - `L = sum(mask * w_q * w_t * pinball) / sum(mask * w_q * w_t)`
+
+- `magnitude_weighted`:
+  - Goal: pay more attention to large absolute returns.
+  - Weight:
+    - `w_mag = 1 + abs(y)^alpha`
+  - Objective:
+    - `L = sum(mask * w_mag * pinball) / sum(mask * w_mag)` (per quantile, then aggregated)
+
+- `directional_hybrid`:
+  - Goal: combine calibrated quantiles with directional trading signal quality.
+  - Components:
+    - Pinball term: uses `weighted_extreme_time_decay`
+    - Direction term: BCE-with-logits on median-quantile sign prediction
+  - Direction logits:
+    - `logits = median_pred / temperature`
+    - `target_up = 1[y > 0]`
+  - Final objective:
+    - `L = L_pinball + lambda_dir * L_direction`
+
+Notes:
+
+- These losses are intended for research and experimentation on this branch.
+- If you compare variants, keep `prediction_length`, batch construction, and evaluation metric fixed.
+- For financial tasks, start with `directional_hybrid` and tune `loss_directional_lambda` and `loss_time_decay` first.
+
 ## Example Notebooks
 
 - [Chronos-2 Quick Start](notebooks/chronos-2-quickstart.ipynb)
