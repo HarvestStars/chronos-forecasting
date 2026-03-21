@@ -5,10 +5,11 @@
 
 import copy
 from dataclasses import dataclass
-from typing import cast
+from typing import Callable, Literal, cast
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange, repeat
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import ModelOutput
@@ -200,6 +201,12 @@ class Chronos2Model(PreTrainedModel):
     _supports_long_horizon: bool = True
     _supports_future_covariates: bool = True
     _supports_sdpa: bool = True
+    _supported_loss_types: tuple[str, ...] = (
+        "native",
+        "weighted_extreme_time_decay",
+        "magnitude_weighted",
+        "directional_hybrid",
+    )
 
     def __init__(self, config: Chronos2CoreConfig):
         assert hasattr(config, "chronos_config"), "Not a valid Chronos config"
@@ -262,6 +269,154 @@ class Chronos2Model(PreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+
+        loss_config = getattr(config, "loss_config", None)
+        self.set_loss_config(**loss_config) if isinstance(loss_config, dict) else self.set_loss_config()
+
+    def set_loss_config(
+        self,
+        loss_type: Literal[
+            "native", "weighted_extreme_time_decay", "magnitude_weighted", "directional_hybrid"
+        ] = "native",
+        loss_quantile_extreme_gamma: float = 2.0,
+        loss_quantile_extreme_power: float = 2.0,
+        loss_time_decay: float = 0.8,
+        loss_magnitude_alpha: float = 1.0,
+        loss_directional_lambda: float = 0.2,
+        loss_directional_temperature: float = 0.1,
+    ) -> None:
+        if loss_type not in self._supported_loss_types:
+            raise ValueError(
+                f"Unsupported loss_type='{loss_type}'. Supported values: {self._supported_loss_types}"
+            )
+        if loss_quantile_extreme_gamma < 0.0:
+            raise ValueError(
+                f"loss_quantile_extreme_gamma must be >= 0.0, got {loss_quantile_extreme_gamma}"
+            )
+        if loss_quantile_extreme_power <= 0.0:
+            raise ValueError(
+                f"loss_quantile_extreme_power must be > 0.0, got {loss_quantile_extreme_power}"
+            )
+        if not (0.0 < loss_time_decay <= 1.0):
+            raise ValueError(f"loss_time_decay must be in (0.0, 1.0], got {loss_time_decay}")
+        if loss_magnitude_alpha < 0.0:
+            raise ValueError(f"loss_magnitude_alpha must be >= 0.0, got {loss_magnitude_alpha}")
+        if loss_directional_lambda < 0.0:
+            raise ValueError(f"loss_directional_lambda must be >= 0.0, got {loss_directional_lambda}")
+        if loss_directional_temperature <= 0.0:
+            raise ValueError(
+                f"loss_directional_temperature must be > 0.0, got {loss_directional_temperature}"
+            )
+
+        self.loss_type = loss_type
+        self.loss_quantile_extreme_gamma = float(loss_quantile_extreme_gamma)
+        self.loss_quantile_extreme_power = float(loss_quantile_extreme_power)
+        self.loss_time_decay = float(loss_time_decay)
+        self.loss_magnitude_alpha = float(loss_magnitude_alpha)
+        self.loss_directional_lambda = float(loss_directional_lambda)
+        self.loss_directional_temperature = float(loss_directional_temperature)
+
+        # Keep the setting in config so checkpoints can be resumed with the same training objective.
+        self.config.loss_config = {
+            "loss_type": self.loss_type,
+            "loss_quantile_extreme_gamma": self.loss_quantile_extreme_gamma,
+            "loss_quantile_extreme_power": self.loss_quantile_extreme_power,
+            "loss_time_decay": self.loss_time_decay,
+            "loss_magnitude_alpha": self.loss_magnitude_alpha,
+            "loss_directional_lambda": self.loss_directional_lambda,
+            "loss_directional_temperature": self.loss_directional_temperature,
+        }
+
+    def _get_quantile_weights(self) -> torch.Tensor:
+        centered_quantile_distance = (2.0 * torch.abs(self.quantiles - 0.5)).pow(self.loss_quantile_extreme_power)
+        return 1.0 + self.loss_quantile_extreme_gamma * centered_quantile_distance
+
+    def _get_time_weights(self, horizon: int) -> torch.Tensor:
+        if self.loss_time_decay == 1.0:
+            weights = torch.ones(horizon, device=self.device, dtype=self.quantiles.dtype)
+        else:
+            steps = torch.arange(horizon, device=self.device, dtype=self.quantiles.dtype)
+            weights = torch.pow(
+                torch.tensor(self.loss_time_decay, device=self.device, dtype=self.quantiles.dtype), steps
+            )
+        return weights / weights.mean().clamp_min(1e-8)
+
+    def _get_magnitude_weights(self, future_target: torch.Tensor) -> torch.Tensor:
+        # future_target shape: (B, 1, H)
+        return 1.0 + torch.abs(future_target).pow(self.loss_magnitude_alpha)
+
+    def _loss_native(self, quantile_loss: torch.Tensor, loss_mask: torch.Tensor, **_) -> torch.Tensor:
+        loss = quantile_loss * loss_mask
+        return loss.mean(dim=-1).sum(dim=-1).mean()
+
+    def _loss_weighted_extreme_time_decay(
+        self, quantile_loss: torch.Tensor, loss_mask: torch.Tensor, **_
+    ) -> torch.Tensor:
+        quantile_weights = rearrange(self._get_quantile_weights(), "q -> 1 q 1")
+        time_weights = rearrange(self._get_time_weights(quantile_loss.shape[-1]), "h -> 1 1 h")
+
+        weighted_mask = loss_mask * quantile_weights * time_weights # shape (B, num_quantiles, future_length)
+        weighted_loss = quantile_loss * weighted_mask # shape (B, num_quantiles, future_length)
+
+        normalizer = weighted_mask.sum(dim=(-1, -2)).clamp_min(1e-8)
+        return (weighted_loss.sum(dim=(-1, -2)) / normalizer).mean()
+
+    def _loss_magnitude_weighted(
+        self,
+        quantile_loss: torch.Tensor,
+        loss_mask: torch.Tensor,
+        future_target: torch.Tensor,
+        **_,
+    ) -> torch.Tensor:
+        magnitude_weights = self._get_magnitude_weights(future_target)
+        weighted_mask = loss_mask * magnitude_weights
+        weighted_loss = quantile_loss * weighted_mask
+        normalizer = weighted_mask.sum(dim=-1).clamp_min(1e-8)
+        return (weighted_loss.sum(dim=-1) / normalizer).sum(dim=-1).mean()
+
+    def _loss_directional_hybrid(
+        self,
+        quantile_loss: torch.Tensor,
+        loss_mask: torch.Tensor,
+        future_target: torch.Tensor,
+        quantile_preds: torch.Tensor,
+        **_,
+    ) -> torch.Tensor:
+        # Pinball component: keep uncertainty quality and bias tails/near-term for trading relevance.
+        pinball_loss = self._loss_weighted_extreme_time_decay(
+            quantile_loss=quantile_loss, loss_mask=loss_mask, future_target=future_target
+        )
+
+        # Directional component: classify sign of return using median quantile prediction.
+        median_index = int(torch.argmin(torch.abs(self.quantiles - 0.5)).item())
+        median_preds = quantile_preds[:, median_index : median_index + 1]
+        target_up = (future_target > 0.0).to(median_preds.dtype)
+
+        logits = median_preds / self.loss_directional_temperature
+        directional_raw = F.binary_cross_entropy_with_logits(logits, target_up, reduction="none")
+
+        time_weights = rearrange(self._get_time_weights(quantile_loss.shape[-1]), "h -> 1 1 h")
+        magnitude_weights = self._get_magnitude_weights(future_target)
+        directional_mask = loss_mask * time_weights * magnitude_weights
+        directional_loss = directional_raw * directional_mask
+        directional_normalizer = directional_mask.sum(dim=-1).clamp_min(1e-8)
+        directional_loss = (directional_loss.sum(dim=-1) / directional_normalizer).mean()
+
+        return pinball_loss + self.loss_directional_lambda * directional_loss
+
+    def _get_loss_fn(self) -> Callable[..., torch.Tensor]:
+        loss_fns: dict[str, Callable[..., torch.Tensor]] = {
+            "native": self._loss_native,
+            "weighted_extreme_time_decay": self._loss_weighted_extreme_time_decay,
+            "magnitude_weighted": self._loss_magnitude_weighted,
+            "directional_hybrid": self._loss_directional_hybrid,
+        }
+        try:
+            return loss_fns[self.loss_type]
+        except KeyError as e:
+            raise RuntimeError(
+                f"Unknown loss_type='{self.loss_type}'. Supported values: {self._supported_loss_types}"
+            ) from e
 
     def _init_weights(self, module):
         super()._init_weights(module)
@@ -542,11 +697,13 @@ class Chronos2Model(PreTrainedModel):
         )
         # the first components masks any missing targets and the second component masks known future values
         loss_mask = future_target_mask.float() * inv_future_covariate_mask # shape: (B, 1, future_length) * (B, 1, (n p)) --> (B, 1, future_length)
-        loss = quantile_loss * loss_mask                                   # shape: (B, num_quantiles(q), future_length(n*p)) * (B, 1, future_length) --> (B, num_quantiles, future_length)
-        # mean over prediction horizon, sum over quantile levels and mean over batch
-        loss = loss.mean(dim=-1).sum(dim=-1).mean()
-
-        return loss
+        loss_fn = self._get_loss_fn()
+        return loss_fn(
+            quantile_loss=quantile_loss,
+            loss_mask=loss_mask,
+            quantile_preds=quantile_preds,
+            future_target=future_target,
+        )
 
     def encode(
         self,

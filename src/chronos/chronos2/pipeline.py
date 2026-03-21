@@ -117,6 +117,15 @@ class Chronos2Pipeline(BaseChronosPipeline):
         remove_printer_callback: bool = False,
         disable_data_parallel: bool = True,
         convert_inputs: bool = True,
+        loss_type: Literal[
+            "native", "weighted_extreme_time_decay", "magnitude_weighted", "directional_hybrid"
+        ] = "native",
+        loss_quantile_extreme_gamma: float = 2.0,
+        loss_quantile_extreme_power: float = 2.0,
+        loss_time_decay: float = 0.8,
+        loss_magnitude_alpha: float = 1.0,
+        loss_directional_lambda: float = 0.2,
+        loss_directional_temperature: float = 0.1,
         **extra_trainer_kwargs,
     ) -> "Chronos2Pipeline":
         """
@@ -167,6 +176,33 @@ class Chronos2Pipeline(BaseChronosPipeline):
             If True (default), preprocess raw inputs (convert tensors, encode categoricals, validate).
             If False, inputs are expected to be already preprocessed using `chronos.chronos2.dataset.prepare_inputs`.
             This allows for efficient training on large datasets that don't fit in memory.
+        loss_type
+            Loss variant to optimize during fine-tuning.
+            - `native`: original Chronos-2 pinball objective
+            - `weighted_extreme_time_decay`: emphasizes tail quantiles and near-term steps
+            - `magnitude_weighted`: emphasizes larger absolute returns
+            - `directional_hybrid`: combines weighted pinball with directional-sign classification
+        loss_quantile_extreme_gamma
+            Strength of extra penalty for extreme quantiles when using weighted pinball components
+            (`weighted_extreme_time_decay` / `directional_hybrid`).
+            Must be non-negative.
+        loss_quantile_extreme_power
+            Controls how fast quantile weights increase toward the tails when
+            using weighted pinball components (`weighted_extreme_time_decay` / `directional_hybrid`).
+            Must be positive.
+        loss_time_decay
+            Exponential decay factor for horizon weighting when using weighted-time components
+            (`weighted_extreme_time_decay` / `directional_hybrid`).
+            Must be in (0, 1]. Smaller values emphasize the earliest forecast steps more.
+        loss_magnitude_alpha
+            Exponent controlling how strongly large absolute returns are upweighted in
+            `magnitude_weighted` and `directional_hybrid`. Must be non-negative.
+        loss_directional_lambda
+            Weight of the directional-sign penalty term in `directional_hybrid`.
+            Must be non-negative.
+        loss_directional_temperature
+            Temperature for converting median return prediction into directional logits in
+            `directional_hybrid`. Must be positive.
         **extra_trainer_kwargs
             Extra kwargs are directly forwarded to `TrainingArguments`
 
@@ -202,6 +238,15 @@ class Chronos2Pipeline(BaseChronosPipeline):
         config = deepcopy(self.model.config)
         model = Chronos2Model(config).to(self.model.device)  # type: ignore
         model.load_state_dict(self.model.state_dict())
+        model.set_loss_config(
+            loss_type=loss_type,
+            loss_quantile_extreme_gamma=loss_quantile_extreme_gamma,
+            loss_quantile_extreme_power=loss_quantile_extreme_power,
+            loss_time_decay=loss_time_decay,
+            loss_magnitude_alpha=loss_magnitude_alpha,
+            loss_directional_lambda=loss_directional_lambda,
+            loss_directional_temperature=loss_directional_temperature,
+        )
 
         if finetune_mode == "lora":
             if lora_config is None:
