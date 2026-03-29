@@ -685,7 +685,7 @@ class Chronos2Model(PreTrainedModel):
             )
 
         quantiles = rearrange(self.quantiles, "num_quantiles -> 1 num_quantiles 1")
-        quantile_loss = 2 * torch.abs( # shape: (B, 1, future_length) broadcasted to (B, num_quantiles, future_length) --> (B, num_quantiles, future_length)
+        quantile_loss = 2 * torch.abs( # shape: B means the Number of TimeSeries, (B, 1, future_length) broadcasted to (B, num_quantiles, future_length) --> error (B, num_quantiles, future_length)
             (future_target - quantile_preds) * ((future_target <= quantile_preds).float() - quantiles)
         )
         inv_future_covariate_mask = 1 - rearrange( # in inv_mask, value 1 indicates missing(forecasted), value 0 known future
