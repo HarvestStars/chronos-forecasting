@@ -229,7 +229,7 @@ def prepare_inputs(
     """
     inputs: list[PreparedInput] = []
 
-    for idx, raw_input in enumerate(raw_inputs):
+    for idx, raw_input in enumerate(raw_inputs): # (raw_inputs) is original the "tasks"
         # For non-TEST modes, fix future_covariates (replace None/empty with NaN arrays)
         if mode != DatasetMode.TEST:
             raw_future_covariates = raw_input.get("future_covariates", {})
@@ -243,7 +243,7 @@ def prepare_inputs(
                 raw_input = {**raw_input, "future_covariates": fixed_future_covariates}
 
         raw_input = cast(dict[str, TensorOrArray | Mapping[str, TensorOrArray]], raw_input)
-        prepared = validate_and_prepare_single_dict_input(raw_input, idx, prediction_length)
+        prepared = validate_and_prepare_single_dict_input(raw_input, idx, prediction_length) # prepared is one "task"(Group/dict) in the previous version
 
         # Filter by minimum length (except in TEST mode)
         if mode != DatasetMode.TEST and prepared["context"].shape[-1] < min_past + prediction_length:
@@ -257,7 +257,7 @@ def prepare_inputs(
             "Please provide longer time series or reduce `min_past` or `prediction_length`. "
         )
 
-    return inputs
+    return inputs # tasks(groups!)
 
 
 def validate_prepared_schema(prepared_input: Any) -> None:
@@ -530,6 +530,8 @@ class Chronos2Dataset(IterableDataset):
                 isinstance(inputs, Sequence) and len(inputs) > 0 and isinstance(inputs[0], (torch.Tensor, np.ndarray))
             ):
                 inputs = convert_list_of_tensors_input_to_list_of_dicts_input(cast(Sequence[TensorOrArray], inputs))
+            
+            # here is the original self.tasks(groups!)
             self.inputs = prepare_inputs(cast(Iterable[Mapping[str, Any]], inputs), prediction_length, min_past, mode)
         else:
             validate_prepared_schema(inputs[0])
@@ -543,7 +545,7 @@ class Chronos2Dataset(IterableDataset):
         self.mode = mode
 
     def _construct_slice(self, input_idx: int) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, int]:
-        prepared = self.inputs[input_idx]
+        prepared = self.inputs[input_idx] # prepared is one task from inputs(groups!)
         past_tensor = prepared["context"].clone()  # shape: (n_targets + n_covariates, history_length)
         future_tensor = prepared["future_covariates"].clone()
         n_targets = int(prepared["n_targets"])
